@@ -64,7 +64,7 @@ Built on Android's **Device Owner** (`DevicePolicyManager`) APIs:
 ### 1. Build & Install
 Clone the repository, open it in **Android Studio**, sync Gradle, and install the debug or release APK onto your target Android device:
 ```bash
-git clone https://github.com/<your-username>/<your-repo>.git
+git clone https://github.com/ALIYUsbly/ScreenTimeManager.git
 cd ScreenTimeManager
 ./gradlew installDebug
 ```
