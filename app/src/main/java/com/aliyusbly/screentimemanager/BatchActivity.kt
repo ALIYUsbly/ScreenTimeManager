@@ -2,6 +2,8 @@ package com.aliyusbly.screentimemanager
 
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Bundle
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -62,15 +64,31 @@ class BatchActivity : SecureActivity() {
 
 private data class AppItem(val pkg: String, val label: String)
 
-private fun loadLaunchable(ctx: Context): List<AppItem> {
+private fun loadAllInstalled(ctx: Context): List<AppItem> {
     val pm = ctx.packageManager
-    val skip = Safety.protectedPackages(ctx)
-    val intent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
-    return pm.queryIntentActivities(intent, 0)
-        .map { it.activityInfo.packageName to it.loadLabel(pm).toString() }
-        .distinctBy { it.first }
-        .filter { it.first !in skip }
-        .map { AppItem(it.first, it.second) }
+    val selfPkg = ctx.packageName
+    val launcherIntent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
+    val launchablePkgs = pm.queryIntentActivities(launcherIntent, 0)
+        .map { it.activityInfo.packageName }
+        .toSet()
+
+    @Suppress("DEPRECATION")
+    val installed = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+        pm.getInstalledApplications(PackageManager.ApplicationInfoFlags.of(0L))
+    } else {
+        pm.getInstalledApplications(PackageManager.GET_META_DATA)
+    }
+
+    return installed
+        .filter { it.packageName != selfPkg }
+        .distinctBy { it.packageName }
+        .map { ai ->
+            val label = pm.getApplicationLabel(ai)?.toString()?.takeIf { it.isNotBlank() } ?: ai.packageName
+            AppItem(
+                pkg = ai.packageName,
+                label = if (ai.packageName in launchablePkgs) label else "$label (${ai.packageName})"
+            )
+        }
         .sortedBy { it.label.lowercase() }
 }
 
@@ -82,7 +100,7 @@ private fun isInstalled(ctx: Context, pkg: String) = try {
 
 /** Turns typed text (names or packages, split by comma / semicolon / new line) into packages. */
 private fun matchTyped(ctx: Context, apps: List<AppItem>, text: String): Pair<Set<String>, List<String>> {
-    val skip = Safety.protectedPackages(ctx)
+    val selfPkg = ctx.packageName
     val found = LinkedHashSet<String>()
     val missing = mutableListOf<String>()
     for (tok in text.split(',', ';', '\n').map { it.trim() }.filter { it.isNotEmpty() }) {
@@ -93,7 +111,7 @@ private fun matchTyped(ctx: Context, apps: List<AppItem>, text: String): Pair<Se
             byPkg != null -> byPkg.pkg
             byLabel.size == 1 -> byLabel[0].pkg
             partial.size == 1 -> partial[0].pkg
-            tok.contains('.') && tok !in skip && isInstalled(ctx, tok) -> tok
+            tok.contains('.') && tok != selfPkg && isInstalled(ctx, tok) -> tok
             else -> null
         }
         if (hit != null) found.add(hit) else missing.add(tok)
@@ -116,18 +134,18 @@ private fun BatchScreen(onBack: () -> Unit) {
     var typeDialog by remember { mutableStateOf(false) }
 
     LaunchedEffect(Unit) {
-        apps = withContext(Dispatchers.Default) { loadLaunchable(ctx) }
+        apps = withContext(Dispatchers.Default) { loadAllInstalled(ctx) }
         loading = false
     }
 
     val shown = remember(apps, query, filter, rules) {
         apps.filter { a ->
             (query.isBlank() || a.label.contains(query, true) || a.pkg.contains(query, true)) &&
-                when (filter) {
-                    1 -> a.pkg in rules
-                    2 -> a.pkg !in rules
-                    else -> true
-                }
+                    when (filter) {
+                        1 -> a.pkg in rules
+                        2 -> a.pkg !in rules
+                        else -> true
+                    }
         }
     }
     val managedSelected = selected.count { it in rules }
@@ -177,8 +195,14 @@ private fun BatchScreen(onBack: () -> Unit) {
                     TextButton(
                         enabled = managedSelected > 0,
                         onClick = {
-                            store.removeRules(selected.filter { it in rules })
-                            finish("Stopped managing $managedSelected app(s)")
+                            if (store.isSelfLocked()) {
+                                ctx.toast("Locked until ${Clock.formatDate(store.selfLockUntil())}")
+                            } else if (store.hardening("no_debugging", false)) {
+                                ctx.toast("Cannot stop managing apps while Lockdown is active")
+                            } else {
+                                store.removeRules(selected.filter { it in rules })
+                                finish("Stopped managing $managedSelected app(s)")
+                            }
                         }
                     ) { Text("Stop managing", color = MaterialTheme.colorScheme.error) }
                     Button(enabled = selected.isNotEmpty(), onClick = { applyDialog = true }) { Text("Apply rule") }
@@ -243,7 +267,7 @@ private fun BatchScreen(onBack: () -> Unit) {
                     selected = selected + found
                     ctx.toast(
                         "Selected ${found.size}" +
-                            if (missing.isEmpty()) "" else ". Not found / unclear: ${missing.joinToString(", ")}"
+                                if (missing.isEmpty()) "" else ". Not found / unclear: ${missing.joinToString(", ")}"
                     )
                 }
             }

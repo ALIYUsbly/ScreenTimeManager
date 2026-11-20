@@ -48,12 +48,10 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.TimePicker
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.dynamicDarkColorScheme
 import androidx.compose.material3.dynamicLightColorScheme
 import androidx.compose.material3.lightColorScheme
-import androidx.compose.material3.rememberTimePickerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
@@ -289,9 +287,10 @@ private const val NO_EDIT = -2
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun TimeEntry(label: String, initial: Int, onValue: (Int?) -> Unit) {
-    val h24 = (initial / 60) % 24
+    val norm = ((initial % 1440) + 1440) % 1440
+    val h24 = norm / 60
     var hour by remember { mutableStateOf((if (h24 % 12 == 0) 12 else h24 % 12).toString()) }
-    var min by remember { mutableStateOf("%02d".format(initial % 60)) }
+    var min by remember { mutableStateOf("%02d".format(norm % 60)) }
     var pm by remember { mutableStateOf(h24 >= 12) }
     val h = hour.toIntOrNull()
     val m = min.toIntOrNull()

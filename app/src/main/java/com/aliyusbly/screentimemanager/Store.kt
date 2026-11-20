@@ -70,6 +70,14 @@ class Store(ctx: Context) {
         prefs.edit().putStringSet("suspended", s.toSet()).apply()
     }
 
+    /** Packages currently hidden with setApplicationHidden (e.g. Settings or fallback-hidden apps). */
+    fun hiddenApps(): Set<String> =
+        prefs.getStringSet("hidden_pkgs", emptySet())?.toSet() ?: emptySet()
+
+    fun setHiddenApps(s: Set<String>) {
+        prefs.edit().putStringSet("hidden_pkgs", s.toSet()).apply()
+    }
+
     fun reasons(): Map<String, String> {
         val o = JSONObject(prefs.getString("reasons", "{}") ?: "{}")
         val m = HashMap<String, String>()
@@ -101,6 +109,14 @@ class Store(ctx: Context) {
     fun setLastTick(t: Long) {
         prefs.edit().putLong("last_tick", t).apply()
     }
+
+    // ---------- self-enforce lock ----------
+
+    fun selfLockUntil(): Long = prefs.getLong("self_lock_until", 0L)
+    fun setSelfLockUntil(t: Long) {
+        prefs.edit().putLong("self_lock_until", t).apply()
+    }
+    fun isSelfLocked(now: Long = System.currentTimeMillis()): Boolean = selfLockUntil() > now
 
     // ---------- install guard ----------
 

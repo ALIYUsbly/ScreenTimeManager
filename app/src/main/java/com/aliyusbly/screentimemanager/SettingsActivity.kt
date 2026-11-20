@@ -68,6 +68,15 @@ private val levelHelp = listOf(
     "Strict, plus USB debugging is disabled. You lose adb access."
 )
 
+private data class SelfLockChoice(val label: String, val months: Int)
+
+private val selfLockChoices = listOf(
+    SelfLockChoice("1 month", 1),
+    SelfLockChoice("2 months", 2),
+    SelfLockChoice("3 months", 3),
+    SelfLockChoice("1 year", 12)
+)
+
 private fun currentLevel(store: Store): Int {
     val on = DeviceControl.options.filter { store.hardening(it.key, it.defaultOn) }.map { it.key }.toSet()
     return levels.indexOfFirst { it.second == on }
@@ -84,6 +93,10 @@ private fun SettingsScreen(onBack: () -> Unit) {
     val dnsStatus = remember(rev) { DeviceControl.privateDnsStatus(ctx) }
     val dnsLocked = remember(rev) { store.hardening(DeviceControl.KEY_PRIVATE_DNS_LOCK, false) }
 
+    val selfLockUntil = remember(rev) { store.selfLockUntil() }
+    val selfLocked = selfLockUntil > System.currentTimeMillis()
+    var pendingSelfLock by remember { mutableStateOf<SelfLockChoice?>(null) }
+
     val hasPin = remember(rev) { store.hasPin() }
     val level = remember(rev) { currentLevel(store) }
     var bedtime by remember { mutableStateOf(store.globalWindows()) }
@@ -93,9 +106,19 @@ private fun SettingsScreen(onBack: () -> Unit) {
     var lockdownDialog by remember { mutableStateOf(false) }
     var releaseDialog by remember { mutableStateOf(false) }
 
+    fun lockedToast() {
+        ctx.toast("Locked until ${Clock.formatDate(selfLockUntil)}")
+    }
+
     fun applyLevel(i: Int) {
+        if (selfLocked) {
+            lockedToast()
+            return
+        }
         val keys = levels[i].second
-        DeviceControl.options.forEach { store.setHardening(it.key, it.key in keys) }
+        DeviceControl.options.forEach { opt ->
+            store.setHardening(opt.key, opt.key in keys)
+        }
         val errors = DeviceControl.applyHardening(ctx)
         ctx.toast(if (errors.isEmpty()) "${levels[i].first} protection on" else errors.joinToString("\n"))
         rev++
@@ -114,6 +137,34 @@ private fun SettingsScreen(onBack: () -> Unit) {
         Column(
             Modifier.padding(pad).verticalScroll(rememberScrollState()).padding(horizontal = 16.dp).padding(bottom = 32.dp)
         ) {
+            // ── self-enforce lock ──
+            SectionLabel("Self-enforce lock")
+            StmCard {
+                Text(
+                    if (selfLocked) "Locked until ${Clock.formatDate(selfLockUntil)}. Settings are frozen until this date."
+                    else "Freeze your current protection settings without changing your selected mode.",
+                    style = MaterialTheme.typography.bodyMedium
+                )
+                Spacer(Modifier.height(10.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    selfLockChoices.take(2).forEach { choice ->
+                        FilledTonalButton(
+                            modifier = Modifier.weight(1f),
+                            onClick = { pendingSelfLock = choice }
+                        ) { Text(choice.label) }
+                    }
+                }
+                Spacer(Modifier.height(8.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    selfLockChoices.drop(2).forEach { choice ->
+                        FilledTonalButton(
+                            modifier = Modifier.weight(1f),
+                            onClick = { pendingSelfLock = choice }
+                        ) { Text(choice.label) }
+                    }
+                }
+            }
+
             // ── access ──
             SectionLabel("Access")
             StmCard {
@@ -122,13 +173,21 @@ private fun SettingsScreen(onBack: () -> Unit) {
                     "Required to open the app and edit limits. 5 wrong tries = 5 min lockout.",
                     hasPin
                 ) { on ->
-                    if (on) pinDialog = true else {
+                    if (selfLocked) {
+                        lockedToast()
+                    } else if (on) {
+                        pinDialog = true
+                    } else {
                         store.clearPin()
                         rev++
                     }
                 }
                 if (hasPin) {
-                    FilledTonalButton(onClick = { pinDialog = true }) { Text("Change PIN") }
+                    FilledTonalButton(
+                        onClick = {
+                            if (selfLocked) lockedToast() else pinDialog = true
+                        }
+                    ) { Text("Change PIN") }
                 }
             }
 
@@ -137,9 +196,13 @@ private fun SettingsScreen(onBack: () -> Unit) {
             StmCard {
                 Text("Blocks every managed app during these hours.", style = MaterialTheme.typography.bodyMedium)
                 Spacer(Modifier.height(8.dp))
-                WindowsEditor(bedtime) {
-                    bedtime = it
-                    store.setGlobalWindows(it)
+                WindowsEditor(bedtime) { updated ->
+                    if (selfLocked) {
+                        lockedToast()
+                    } else {
+                        bedtime = updated
+                        store.setGlobalWindows(updated)
+                    }
                 }
             }
 
@@ -150,7 +213,11 @@ private fun SettingsScreen(onBack: () -> Unit) {
                     levels.forEachIndexed { i, (n, _) ->
                         FilterChip(
                             selected = level == i,
-                            onClick = { if (i == 2) lockdownDialog = true else applyLevel(i) },
+                            onClick = {
+                                if (selfLocked) lockedToast()
+                                else if (i == 2) lockdownDialog = true
+                                else applyLevel(i)
+                            },
                             label = { Text(n) }
                         )
                     }
@@ -165,15 +232,23 @@ private fun SettingsScreen(onBack: () -> Unit) {
                 Expander("Customize", customOpen, { customOpen = !customOpen }) {
                     DeviceControl.options.forEach { opt ->
                         val on = remember(rev) { store.hardening(opt.key, opt.defaultOn) }
-                        ToggleRow(opt.title, opt.desc, on) {
-                            store.setHardening(opt.key, it)
-                            rev++
+                        ToggleRow(opt.title, opt.desc, on) { next ->
+                            if (selfLocked) {
+                                lockedToast()
+                            } else {
+                                store.setHardening(opt.key, next)
+                                rev++
+                            }
                         }
                     }
                     Spacer(Modifier.height(8.dp))
                     Button(onClick = {
-                        val errors = DeviceControl.applyHardening(ctx)
-                        ctx.toast(if (errors.isEmpty()) "Protections applied" else errors.joinToString("\n"))
+                        if (selfLocked) {
+                            lockedToast()
+                        } else {
+                            val errors = DeviceControl.applyHardening(ctx)
+                            ctx.toast(if (errors.isEmpty()) "Protections applied" else errors.joinToString("\n"))
+                        }
                     }) { Text("Apply") }
                 }
             }
@@ -194,17 +269,25 @@ private fun SettingsScreen(onBack: () -> Unit) {
                 Spacer(Modifier.height(8.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     FilledTonalButton(onClick = {
-                        scope.launch {
-                            val err = withContext(Dispatchers.IO) { DeviceControl.setPrivateDnsHost(ctx, dnsHost) }
-                            ctx.toast(err ?: "Private DNS set")
-                            rev++
+                        if (selfLocked) {
+                            lockedToast()
+                        } else {
+                            scope.launch {
+                                val err = withContext(Dispatchers.IO) { DeviceControl.setPrivateDnsHost(ctx, dnsHost) }
+                                ctx.toast(err ?: "Private DNS set")
+                                rev++
+                            }
                         }
                     }) { Text("Set host") }
                     FilledTonalButton(onClick = {
-                        scope.launch {
-                            val err = withContext(Dispatchers.IO) { DeviceControl.setPrivateDnsAutomatic(ctx) }
-                            ctx.toast(err ?: "Private DNS set to automatic")
-                            rev++
+                        if (selfLocked) {
+                            lockedToast()
+                        } else {
+                            scope.launch {
+                                val err = withContext(Dispatchers.IO) { DeviceControl.setPrivateDnsAutomatic(ctx) }
+                                ctx.toast(err ?: "Private DNS set to automatic")
+                                rev++
+                            }
                         }
                     }) { Text("Automatic") }
                 }
@@ -213,12 +296,16 @@ private fun SettingsScreen(onBack: () -> Unit) {
                     "Block changing Private DNS",
                     "Greys out the Private DNS setting so it can't be switched off. Set your host first.",
                     dnsLocked
-                ) {
-                    ctx.toast(
-                        DeviceControl.setPrivateDnsLocked(ctx, it)
-                            ?: if (it) "Private DNS locked" else "Private DNS unlocked"
-                    )
-                    rev++
+                ) { next ->
+                    if (selfLocked) {
+                        lockedToast()
+                    } else {
+                        ctx.toast(
+                            DeviceControl.setPrivateDnsLocked(ctx, next)
+                                ?: if (next) "Private DNS locked" else "Private DNS unlocked"
+                        )
+                        rev++
+                    }
                 }
             }
 
@@ -242,9 +329,13 @@ private fun SettingsScreen(onBack: () -> Unit) {
                     "Block managed apps if Usage Access is revoked",
                     "Stops the trick of turning off usage tracking.",
                     failClosed
-                ) {
-                    failClosed = it
-                    store.setFailClosed(it)
+                ) { next ->
+                    if (selfLocked) {
+                        lockedToast()
+                    } else {
+                        failClosed = next
+                        store.setFailClosed(next)
+                    }
                 }
                 Spacer(Modifier.height(4.dp))
                 FilledTonalButton(onClick = {
@@ -276,6 +367,31 @@ private fun SettingsScreen(onBack: () -> Unit) {
         }
     }
 
+    pendingSelfLock?.let { choice ->
+        val baseMillis = maxOf(System.currentTimeMillis(), selfLockUntil)
+        val untilMillis = Clock.addMonths(choice.months, baseMillis)
+        AlertDialog(
+            onDismissRequest = { pendingSelfLock = null },
+            title = { Text("Lock settings for ${choice.label}?") },
+            text = {
+                Text(
+                    "This freezes your current settings until ${Clock.formatDate(untilMillis)}. " +
+                            "You won't be able to edit these settings or release Device Owner until then."
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    pendingSelfLock = null
+                    store.setSelfLockUntil(untilMillis)
+                    DeviceControl.applyHardening(ctx)
+                    ctx.toast("Self-lock active until ${Clock.formatDate(untilMillis)}")
+                    rev++
+                }) { Text("Lock") }
+            },
+            dismissButton = { TextButton({ pendingSelfLock = null }) { Text("Cancel") } }
+        )
+    }
+
     if (pinDialog) {
         PinSetDialog(onDone = { pin ->
             if (pin != null) {
@@ -302,11 +418,17 @@ private fun SettingsScreen(onBack: () -> Unit) {
         AlertDialog(
             onDismissRequest = { releaseDialog = false },
             title = { Text("Release device owner?") },
-            text = { Text("All limits stop working. You will need adb to become device owner again.") },
+            text = {
+                Text(
+                    if (selfLocked) "Self-enforce lock is active until ${Clock.formatDate(selfLockUntil)}."
+                    else "All limits stop working. You will need adb to become device owner again."
+                )
+            },
             confirmButton = {
                 TextButton({
                     releaseDialog = false
                     ctx.toast(DeviceControl.release(ctx) ?: "Device owner released")
+                    rev++
                 }) { Text("Release", color = MaterialTheme.colorScheme.error) }
             },
             dismissButton = { TextButton({ releaseDialog = false }) { Text("Cancel") } }

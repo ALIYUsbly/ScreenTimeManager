@@ -1,6 +1,7 @@
 package com.aliyusbly.screentimemanager
 
 import android.content.Context
+import android.util.Log
 import java.util.Calendar
 import kotlin.math.ceil
 
@@ -8,12 +9,17 @@ import kotlin.math.ceil
  * One pass of enforcement. Called every few seconds by EnforcementService and every
  * 15 min by the WorkManager watchdog. Fully recomputes the desired state from rules + usage,
  * so it is idempotent and self-healing.
+ *
+ * Blocking methods:
+ *  - user apps   -> setPackagesSuspended (app shows a "paused" dialog)
+ *  - system apps -> setApplicationHidden (like TestDPC "Hide": the app disappears completely)
+ *  - if Android refuses to suspend an app, it is hidden instead.
  */
 object Enforcer {
 
+    private const val TAG = "STM"
     private val lock = Any()
 
-    /** Lets other code (InstallGuard UI actions) change shared state without racing a pass. */
     fun <T> exclusive(block: () -> T): T = synchronized(lock) { block() }
 
     fun run(ctx: Context) {
@@ -28,14 +34,9 @@ object Enforcer {
         val now = System.currentTimeMillis()
         store.setLastTick(now)
 
-        try {
-            InstallGuard.reconcile(ctx, dpm, admin, store, Safety.protectedPackages(ctx))
-        } catch (t: Throwable) {
-            android.util.Log.e("STM", "install guard failed", t)
-        }
-
         val rules = store.rules()
-        val protectedPkgs = Safety.protectedPackages(ctx)
+        // Never allow locking/hiding our own app; allow Settings if a rule exists or useHide is true
+        val hardProtected = Safety.protectedPackages(ctx) - "com.android.settings" + ctx.packageName
         val hasUsage = UsageEngine.hasAccess(ctx)
 
         val usage = if (hasUsage && rules.isNotEmpty()) {
@@ -52,39 +53,91 @@ object Enforcer {
         val failClosed = store.failClosed()
 
         val verdicts = LinkedHashMap<String, String>()
+        val hideKind = HashSet<String>()
         for ((pkg, rule) in rules) {
-            if (pkg in protectedPkgs) continue
+            if (pkg in hardProtected) continue
+            val hide = pkg == "com.android.settings" || Safety.useHide(ctx, pkg)
+            if (hide) hideKind.add(pkg)
             val reason = verdict(
-                store, rule, usage[pkg], hasUsage, failClosed,
+                store, rule, usage[pkg], hasUsage,
+                // Never fail-closed a hidden-type app (Settings): otherwise Usage Access
+                // could not be re-granted and you would be locked out.
+                failClosed && !hide,
                 now, minute, dow0, focus, globalWindows
             )
             if (reason != null) verdicts[pkg] = reason
             else maybeWarn(ctx, store, rule, usage[pkg], dow0)
         }
 
-        // Apply: suspend newly blocked, restore anything we suspended that is no longer blocked.
         val suspended = store.suspended().toMutableSet()
+        val hidden = store.hiddenApps().toMutableSet()
 
-        val toSuspend = verdicts.keys.filter { it !in suspended }
-        if (toSuspend.isNotEmpty()) {
+        val wantHide = verdicts.keys.filter { it in hideKind }.toSet()
+        val wantSuspend = verdicts.keys.filter { it !in hideKind }.toSet()
+        // apps that fell back from suspend to hide stay hidden while still blocked
+        val keepHidden = wantHide + wantSuspend.filter { it in hidden }
+
+        // 1) restore everything that is no longer blocked
+        for (pkg in hidden.filter { it !in keepHidden }) {
             try {
-                val failed = dpm.setPackagesSuspended(admin, toSuspend.toTypedArray(), true).toSet()
-                suspended.addAll(toSuspend.filter { it !in failed })
-            } catch (_: Exception) {
+                if (dpm.setApplicationHidden(admin, pkg, false)) hidden.remove(pkg)
+                else Log.w(TAG, "could not unhide $pkg")
+            } catch (e: Exception) {
+                Log.w(TAG, "unhide $pkg failed", e)
+            }
+        }
+        val restoreSuspend = suspended.filter { it !in wantSuspend }
+        if (restoreSuspend.isNotEmpty()) {
+            try {
+                val failed = dpm.setPackagesSuspended(admin, restoreSuspend.toTypedArray(), false).toSet()
+                suspended.removeAll(restoreSuspend.filter { it !in failed }.toSet())
+            } catch (e: Exception) {
+                Log.w(TAG, "unsuspend failed", e)
             }
         }
 
-        val toRestore = suspended.filter { it !in verdicts.keys }
-        if (toRestore.isNotEmpty()) {
+        // 2) hide system / Settings apps
+        val problems = HashMap<String, String>()
+        for (pkg in wantHide) {
+            if (pkg in hidden) continue
             try {
-                val failed = dpm.setPackagesSuspended(admin, toRestore.toTypedArray(), false).toSet()
-                suspended.removeAll(toRestore.filter { it !in failed }.toSet())
-            } catch (_: Exception) {
+                if (dpm.setApplicationHidden(admin, pkg, true)) hidden.add(pkg)
+                else problems[pkg] = "Android refused to hide it"
+            } catch (e: Exception) {
+                problems[pkg] = e.message ?: "hide failed"
+                Log.w(TAG, "hide $pkg failed", e)
+            }
+        }
+
+        // 3) suspend user apps (fall back to hiding if refused)
+        val toSuspend = wantSuspend.filter { it !in suspended && it !in hidden }
+        if (toSuspend.isNotEmpty()) {
+            var failed: Set<String> = emptySet()
+            try {
+                failed = dpm.setPackagesSuspended(admin, toSuspend.toTypedArray(), true).toSet()
+            } catch (e: Exception) {
+                failed = toSuspend.toSet()
+                Log.w(TAG, "suspend failed", e)
+            }
+            suspended.addAll(toSuspend.filter { it !in failed })
+            for (pkg in failed) {
+                try {
+                    if (dpm.setApplicationHidden(admin, pkg, true)) hidden.add(pkg)
+                    else problems[pkg] = "Android refused to block it"
+                } catch (e: Exception) {
+                    problems[pkg] = e.message ?: "block failed"
+                }
             }
         }
 
         store.setSuspended(suspended)
-        store.setReasons(verdicts)
+        store.setHiddenApps(hidden)
+
+        val reasons = LinkedHashMap<String, String>()
+        for ((pkg, why) in verdicts) {
+            reasons[pkg] = problems[pkg]?.let { "$why (not applied:$it)" } ?: why
+        }
+        store.setReasons(reasons)
     }
 
     /** Returns the reason an app must be blocked right now, or null if it may run. */
@@ -146,7 +199,7 @@ object Enforcer {
                 rule.pkg
             }
             val mins = ceil(remaining / 60_000.0).toInt()
-            Notifier.warn(ctx, rule.pkg.hashCode(), "$name: about $mins min left today")
+            Notifier.warn(ctx, rule.pkg.hashCode(), "$name: about$mins min left today")
         }
     }
 }

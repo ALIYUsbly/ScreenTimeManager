@@ -19,8 +19,9 @@ data class TimeWindow(val startMin: Int, val endMin: Int) {
         fun fmt(m: Int) = "%02d:%02d".format(m / 60, m % 60)
 
         fun fmt12h(m: Int): String {
-            val h24 = (m / 60) % 24
-            val min = m % 60
+            val norm = ((m % 1440) + 1440) % 1440
+            val h24 = norm / 60
+            val min = norm % 60
             val amPm = if (h24 < 12) "AM" else "PM"
             val h12 = when {
                 h24 == 0 -> 12
@@ -121,6 +122,15 @@ object Clock {
         timeInMillis = startOfDay()
         add(Calendar.DAY_OF_YEAR, 1)
     }.timeInMillis
+
+    fun addMonths(months: Int, fromMillis: Long = System.currentTimeMillis()): Long =
+        Calendar.getInstance().apply {
+            timeInMillis = fromMillis
+            add(Calendar.MONTH, months)
+        }.timeInMillis
+
+    fun formatDate(millis: Long): String =
+        SimpleDateFormat("MMM d, yyyy", Locale.getDefault()).format(Date(millis))
 
     fun dayKey(): String = SimpleDateFormat("yyyyMMdd", Locale.US).format(Date())
 }

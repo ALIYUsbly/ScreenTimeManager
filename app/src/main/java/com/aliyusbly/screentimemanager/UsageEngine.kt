@@ -123,7 +123,6 @@ object UsageEngine {
 object Safety {
     private val FIXED = setOf(
         "android",
-        "com.android.settings",
         "com.android.systemui",
         "com.android.phone",
         "com.android.server.telecom",
@@ -135,6 +134,19 @@ object Safety {
         "com.google.android.permissioncontroller",
         "com.android.permissioncontroller"
     )
+
+    /**
+     * System apps (Settings, Play Store, Chrome pre-installed...) are blocked by HIDING them,
+     * exactly like TestDPC's "Hide". Suspending system apps is refused or unreliable on MIUI.
+     * MATCH_UNINSTALLED_PACKAGES so a package we already hid is still found.
+     */
+    @Suppress("DEPRECATION")
+    fun useHide(ctx: Context, pkg: String): Boolean = try {
+        val ai = ctx.packageManager.getApplicationInfo(pkg, android.content.pm.PackageManager.MATCH_UNINSTALLED_PACKAGES)
+        (ai.flags and android.content.pm.ApplicationInfo.FLAG_SYSTEM) != 0
+    } catch (_: Exception) {
+        false
+    }
 
     fun protectedPackages(ctx: Context): Set<String> {
         val s = HashSet<String>(FIXED)

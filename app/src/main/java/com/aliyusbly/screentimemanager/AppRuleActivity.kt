@@ -22,7 +22,6 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -108,7 +107,16 @@ private fun RuleScreen(pkg: String, name: String, existing: AppRule?, onBack: ()
     }
 
     fun remove() {
-        Store(ctx).removeRule(pkg)
+        val st = Store(ctx)
+        if (st.isSelfLocked()) {
+            ctx.toast("Locked until ${Clock.formatDate(st.selfLockUntil())}")
+            return
+        }
+        if (st.hardening("no_debugging", false)) {
+            ctx.toast("Cannot stop managing apps while Lockdown is active")
+            return
+        }
+        st.removeRule(pkg)
         Thread { Enforcer.run(ctx.applicationContext) }.start()
         ctx.toast("Removed")
         onBack()

@@ -4,7 +4,10 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
+import android.content.pm.ApplicationInfo
+import android.content.pm.PackageManager
 import android.graphics.drawable.Drawable
+import android.os.Build
 import android.os.Bundle
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -137,12 +140,36 @@ private fun loadSnap(ctx: Context): Snap {
 
 private fun loadApps(ctx: Context): List<AppEntry> {
     val pm = ctx.packageManager
-    val prot = Safety.protectedPackages(ctx)
-    val intent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
-    return pm.queryIntentActivities(intent, 0)
-        .filter { it.activityInfo.packageName !in prot }
-        .distinctBy { it.activityInfo.packageName }
-        .map { AppEntry(it.activityInfo.packageName, it.loadLabel(pm).toString(), it.loadIcon(pm)) }
+    val selfPkg = ctx.packageName
+    val launcherIntent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
+    val launchablePkgs = pm.queryIntentActivities(launcherIntent, 0)
+        .map { it.activityInfo.packageName }
+        .toSet()
+
+    @Suppress("DEPRECATION")
+    val apps: List<ApplicationInfo> = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+        pm.getInstalledApplications(PackageManager.ApplicationInfoFlags.of(0L))
+    } else {
+        pm.getInstalledApplications(PackageManager.GET_META_DATA)
+    }
+
+    return apps
+        .filter { it.packageName != selfPkg }
+        .distinctBy { it.packageName }
+        .map { ai ->
+            val label = pm.getApplicationLabel(ai)?.toString()?.takeIf { it.isNotBlank() } ?: ai.packageName
+            val icon = try {
+                pm.getApplicationIcon(ai)
+            } catch (_: Exception) {
+                pm.defaultActivityIcon
+            }
+            AppEntry(
+                pkg = ai.packageName,
+                label = if (ai.packageName in launchablePkgs) label else "$label (${ai.packageName})",
+                icon = icon
+            )
+        }
+        .sortedBy { it.label.lowercase() }
 }
 
 // ───────────────────────── screen ─────────────────────────

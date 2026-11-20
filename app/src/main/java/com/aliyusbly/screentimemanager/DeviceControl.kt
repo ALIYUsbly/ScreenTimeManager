@@ -86,7 +86,7 @@ object DeviceControl {
                 DevicePolicyManager.PRIVATE_DNS_MODE_OFF -> "Off"
                 else -> "Not set by this app"
             }
-        } catch (e: Exception) {
+        } catch (_: Exception) {
             "Unavailable"
         }
     }
@@ -94,6 +94,7 @@ object DeviceControl {
     /** Does network I/O (the system checks the host speaks DNS-over-TLS). Call off the main thread. */
     fun setPrivateDnsHost(ctx: Context, host: String): String? {
         if (!isOwner(ctx)) return "This app is not the device owner."
+        if (Store(ctx).isSelfLocked()) return "Self-enforce lock is active; settings cannot be changed."
         if (Build.VERSION.SDK_INT < 29) return "Private DNS control needs Android 10+."
         val h = host.trim().lowercase()
         if (h.isEmpty() || !h.contains('.')) return "Enter a hostname, e.g. dns.google"
@@ -111,6 +112,7 @@ object DeviceControl {
 
     fun setPrivateDnsAutomatic(ctx: Context): String? {
         if (!isOwner(ctx)) return "This app is not the device owner."
+        if (Store(ctx).isSelfLocked()) return "Self-enforce lock is active; settings cannot be changed."
         if (Build.VERSION.SDK_INT < 29) return "Private DNS control needs Android 10+."
         return try {
             if (dpm(ctx).setGlobalPrivateDnsModeOpportunistic(admin(ctx)) ==
@@ -124,6 +126,7 @@ object DeviceControl {
     /** DISALLOW_CONFIG_PRIVATE_DNS: greys out Settings > Private DNS. */
     fun setPrivateDnsLocked(ctx: Context, on: Boolean): String? {
         if (!isOwner(ctx)) return "This app is not the device owner."
+        if (Store(ctx).isSelfLocked()) return "Self-enforce lock is active; settings cannot be changed."
         if (Build.VERSION.SDK_INT < 29) return "Private DNS control needs Android 10+."
         return try {
             if (on) dpm(ctx).addUserRestriction(admin(ctx), UserManager.DISALLOW_CONFIG_PRIVATE_DNS)
@@ -157,13 +160,16 @@ object DeviceControl {
         val d = dpm(ctx)
         val a = admin(ctx)
         val store = Store(ctx)
+        val selfLocked = store.isSelfLocked()
         val errors = mutableListOf<String>()
 
         // Old versions blocked ALL installs; that also breaks Play Store updates. InstallGuard replaces it.
         try { d.clearUserRestriction(a, UserManager.DISALLOW_INSTALL_APPS) } catch (_: Exception) {}
 
         for (opt in options) {
-            val on = store.hardening(opt.key, opt.defaultOn)
+            val desiredOn = store.hardening(opt.key, opt.defaultOn)
+            // Freeze whatever is currently enabled without turning on options that are off (like ADB in Standard/Strict)
+            val on = if (selfLocked && !desiredOn) false else desiredOn
             try {
                 when (opt.key) {
                     "protect_self" -> {
@@ -218,15 +224,25 @@ object DeviceControl {
         val d = dpm(ctx)
         val a = admin(ctx)
         if (!d.isDeviceOwnerApp(ctx.packageName)) return "Not device owner"
+        val store = Store(ctx)
+        if (store.isSelfLocked()) {
+            return "Self-enforce lock is active until ${Clock.formatDate(store.selfLockUntil())}."
+        }
         return try {
-            val store = Store(ctx)
             val sus = store.suspended()
             if (sus.isNotEmpty()) d.setPackagesSuspended(a, sus.toTypedArray(), false)
             store.setSuspended(emptySet())
+
+            for (p in store.hiddenApps()) {
+                try { d.setApplicationHidden(a, p, false) } catch (_: Exception) {}
+            }
+            store.setHiddenApps(emptySet())
+
             for (p in store.pending()) {
                 try { d.setApplicationHidden(a, p, false) } catch (_: Exception) {}
             }
             store.setPending(emptySet())
+
             d.clearUserRestriction(a, UserManager.DISALLOW_INSTALL_APPS)
             for (o in options) restriction(o.key)?.let { d.clearUserRestriction(a, it) }
             if (Build.VERSION.SDK_INT >= 29) d.clearUserRestriction(a, UserManager.DISALLOW_CONFIG_PRIVATE_DNS)
