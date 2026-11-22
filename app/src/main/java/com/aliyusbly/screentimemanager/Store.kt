@@ -16,6 +16,12 @@ class Store(ctx: Context) {
         app.getSharedPreferences("screen_time_v2", Context.MODE_PRIVATE)
 
     init {
+        // A lock saved by the previous build as a plain date is adopted, never dropped.
+        val legacyLock = prefs.getLong("self_lock_until", 0L)
+        if (legacyLock != 0L) {
+            Commitment.adoptLegacy(app, legacyLock)
+            prefs.edit().remove("self_lock_until").apply()
+        }
         migrateLegacy()
     }
 
@@ -34,6 +40,8 @@ class Store(ctx: Context) {
 
     @Synchronized
     fun saveRule(r: AppRule) {
+        // While self-locked, existing rules are frozen; new apps can still be added.
+        if (isSelfLocked() && r.pkg in rules()) return
         val o = JSONObject(prefs.getString("rules", "{}") ?: "{}")
         o.put(r.pkg, r.toJson())
         prefs.edit().putString("rules", o.toString()).apply()
@@ -41,6 +49,7 @@ class Store(ctx: Context) {
 
     @Synchronized
     fun removeRule(pkg: String) {
+        if (isSelfLocked()) return
         val o = JSONObject(prefs.getString("rules", "{}") ?: "{}")
         o.remove(pkg)
         prefs.edit().putString("rules", o.toString()).apply()
@@ -50,12 +59,14 @@ class Store(ctx: Context) {
     @Synchronized
     fun saveRules(list: Collection<AppRule>) {
         val o = JSONObject(prefs.getString("rules", "{}") ?: "{}")
-        list.forEach { o.put(it.pkg, it.toJson()) }
+        val locked = isSelfLocked()
+        list.forEach { if (!locked || !o.has(it.pkg)) o.put(it.pkg, it.toJson()) }
         prefs.edit().putString("rules", o.toString()).apply()
     }
 
     @Synchronized
     fun removeRules(pkgs: Collection<String>) {
+        if (isSelfLocked()) return
         val o = JSONObject(prefs.getString("rules", "{}") ?: "{}")
         pkgs.forEach { o.remove(it) }
         prefs.edit().putString("rules", o.toString()).apply()
@@ -110,13 +121,11 @@ class Store(ctx: Context) {
         prefs.edit().putLong("last_tick", t).apply()
     }
 
-    // ---------- self-enforce lock ----------
+    // ---------- self-enforce lock (engine lives in Commitment.kt) ----------
 
-    fun selfLockUntil(): Long = prefs.getLong("self_lock_until", 0L)
-    fun setSelfLockUntil(t: Long) {
-        prefs.edit().putLong("self_lock_until", t).apply()
-    }
-    fun isSelfLocked(now: Long = System.currentTimeMillis()): Boolean = selfLockUntil() > now
+    /** Wall-clock end of the lock for display, 0 when not locked. */
+    fun selfLockUntil(): Long = Commitment.endWall(app)
+    fun isSelfLocked(): Boolean = Commitment.isLocked(app)
 
     // ---------- install guard ----------
 
@@ -147,6 +156,7 @@ class Store(ctx: Context) {
 
     fun focusUntil() = prefs.getLong("focus_until", 0L)
     fun setFocusUntil(t: Long) {
+        if (isSelfLocked() && t < focusUntil()) return   // may be extended, never shortened
         prefs.edit().putLong("focus_until", t).apply()
     }
 
@@ -159,6 +169,7 @@ class Store(ctx: Context) {
     }
 
     fun setGlobalWindows(ws: List<TimeWindow>) {
+        if (isSelfLocked()) return
         val arr = JSONArray()
         ws.forEach { arr.put(JSONArray().put(it.startMin).put(it.endMin)) }
         prefs.edit().putString("global_windows", arr.toString()).apply()
@@ -167,6 +178,7 @@ class Store(ctx: Context) {
     /** If usage access is revoked, block every managed app instead of silently allowing everything. */
     fun failClosed() = prefs.getBoolean("fail_closed", true)
     fun setFailClosed(v: Boolean) {
+        if (isSelfLocked()) return
         prefs.edit().putBoolean("fail_closed", v).apply()
     }
 
@@ -187,6 +199,7 @@ class Store(ctx: Context) {
 
     fun hardening(key: String, def: Boolean) = prefs.getBoolean("h_$key", def)
     fun setHardening(key: String, v: Boolean) {
+        if (isSelfLocked()) return
         prefs.edit().putBoolean("h_$key", v).apply()
     }
 
@@ -195,12 +208,14 @@ class Store(ctx: Context) {
     fun hasPin() = prefs.contains("pin_hash")
 
     fun setPin(pin: String) {
+        if (isSelfLocked()) return
         val salt = ByteArray(16).also { SecureRandom().nextBytes(it) }
         val s = Base64.encodeToString(salt, Base64.NO_WRAP)
         prefs.edit().putString("pin_salt", s).putString("pin_hash", hash(s, pin)).apply()
     }
 
     fun clearPin() {
+        if (isSelfLocked()) return
         prefs.edit().remove("pin_hash").remove("pin_salt").apply()
     }
 

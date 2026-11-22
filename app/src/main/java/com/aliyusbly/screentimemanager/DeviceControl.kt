@@ -168,8 +168,10 @@ object DeviceControl {
 
         for (opt in options) {
             val desiredOn = store.hardening(opt.key, opt.defaultOn)
-            // Freeze whatever is currently enabled without turning on options that are off (like ADB in Standard/Strict)
-            val on = if (selfLocked && !desiredOn) false else desiredOn
+            // Follows your protection level. The only thing forced during a self-lock is the clock lock
+            // (every level already includes it), otherwise changing the date would end the lock early.
+            // ADB / developer options are never touched unless you chose Lockdown.
+            val on = desiredOn || (selfLocked && opt.key == "no_time_change")
             try {
                 when (opt.key) {
                     "protect_self" -> {

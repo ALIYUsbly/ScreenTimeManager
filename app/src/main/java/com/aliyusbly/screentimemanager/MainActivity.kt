@@ -9,6 +9,8 @@ import android.content.pm.PackageManager
 import android.graphics.drawable.Drawable
 import android.os.Build
 import android.os.Bundle
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -42,6 +44,8 @@ import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Tab
+import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBarDefaults
@@ -69,7 +73,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
-data class AppEntry(val pkg: String, val label: String, val icon: Drawable)
+data class AppEntry(val pkg: String, val label: String, val icon: Drawable, val system: Boolean = false)
 
 private data class Snap(
     val rules: Map<String, AppRule>,
@@ -138,6 +142,7 @@ private fun loadSnap(ctx: Context): Snap {
     )
 }
 
+@Suppress("DEPRECATION")
 private fun loadApps(ctx: Context): List<AppEntry> {
     val pm = ctx.packageManager
     val selfPkg = ctx.packageName
@@ -146,27 +151,46 @@ private fun loadApps(ctx: Context): List<AppEntry> {
         .map { it.activityInfo.packageName }
         .toSet()
 
-    @Suppress("DEPRECATION")
-    val apps: List<ApplicationInfo> = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-        pm.getInstalledApplications(PackageManager.ApplicationInfoFlags.of(0L))
-    } else {
-        pm.getInstalledApplications(PackageManager.GET_META_DATA)
+    val apps: MutableList<ApplicationInfo> = (
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                pm.getInstalledApplications(
+                    PackageManager.ApplicationInfoFlags.of(PackageManager.MATCH_ALL.toLong())
+                )
+            } else {
+                pm.getInstalledApplications(PackageManager.GET_META_DATA)
+            }
+            ).toMutableList()
+
+    // Apps we hid (e.g. Settings) vanish from the system list; keep every managed app reachable.
+    val have = apps.map { it.packageName }.toHashSet()
+    for (p in Store(ctx).rules().keys) {
+        if (p in have) continue
+        try {
+            apps.add(pm.getApplicationInfo(p, PackageManager.MATCH_UNINSTALLED_PACKAGES))
+        } catch (_: Exception) {
+        }
     }
 
     return apps
         .filter { it.packageName != selfPkg }
         .distinctBy { it.packageName }
         .map { ai ->
-            val label = pm.getApplicationLabel(ai)?.toString()?.takeIf { it.isNotBlank() } ?: ai.packageName
+            val launchable = ai.packageName in launchablePkgs
+            val label = pm.getApplicationLabel(ai).toString().takeIf { it.isNotBlank() } ?: ai.packageName
             val icon = try {
                 pm.getApplicationIcon(ai)
             } catch (_: Exception) {
                 pm.defaultActivityIcon
             }
+            // "System" tab = pre-installed background packages with no launcher icon.
+            // Settings, Chrome, YouTube etc. stay in the normal Apps tab.
+            val preInstalled = (ai.flags and ApplicationInfo.FLAG_SYSTEM) != 0 &&
+                    (ai.flags and ApplicationInfo.FLAG_UPDATED_SYSTEM_APP) == 0
             AppEntry(
                 pkg = ai.packageName,
-                label = if (ai.packageName in launchablePkgs) label else "$label (${ai.packageName})",
-                icon = icon
+                label = if (launchable) label else "$label (${ai.packageName})",
+                icon = icon,
+                system = preInstalled && !launchable
             )
         }
         .sortedBy { it.label.lowercase() }
@@ -174,7 +198,7 @@ private fun loadApps(ctx: Context): List<AppEntry> {
 
 // ───────────────────────── screen ─────────────────────────
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 private fun HomeScreen(refresh: Int) {
     val ctx = LocalContext.current
@@ -182,6 +206,7 @@ private fun HomeScreen(refresh: Int) {
     var snap by remember { mutableStateOf<Snap?>(null) }
     var apps by remember { mutableStateOf<List<AppEntry>>(emptyList()) }
     var query by remember { mutableStateOf("") }
+    var tab by remember { mutableIntStateOf(0) }
     var tick by remember { mutableIntStateOf(0) }
     var showLock by remember { mutableStateOf(false) }
 
@@ -207,12 +232,37 @@ private fun HomeScreen(refresh: Int) {
     }
 
     val s = snap
-    val filtered = remember(apps, query, s?.rules) {
-        val q = query.trim().lowercase()
-        val managed = s?.rules ?: emptyMap()
-        apps.filter { q.isEmpty() || it.label.lowercase().contains(q) || it.pkg.contains(q) }
-            .sortedWith(compareBy<AppEntry>({ it.pkg !in managed }, { it.label.lowercase() }))
+    val rules = s?.rules ?: emptyMap()
+    val q = query.trim().lowercase()
+
+    // Tab 0: apps with rules. Tab 1: everything else you can open. Tab 2: background system packages.
+    val protectedApps = remember(apps, query, rules) {
+        val byPkg = apps.associateBy { it.pkg }
+        rules.keys
+            .map { byPkg[it] ?: AppEntry(it, it, ctx.packageManager.defaultActivityIcon) }
+            .filter { q.isEmpty() || it.label.lowercase().contains(q) || it.pkg.contains(q) }
+            .sortedBy { it.label.lowercase() }
     }
+    val userApps = remember(apps, query, rules) {
+        apps.filter {
+            !it.system && it.pkg !in rules &&
+                    (q.isEmpty() || it.label.lowercase().contains(q) || it.pkg.contains(q))
+        }
+    }
+    val systemApps = remember(apps, query, rules) {
+        apps.filter {
+            it.system && it.pkg !in rules &&
+                    (q.isEmpty() || it.label.lowercase().contains(q) || it.pkg.contains(q))
+        }
+    }
+    val userCount = apps.count { !it.system && it.pkg !in rules }
+    val systemCount = apps.count { it.system && it.pkg !in rules }
+    val shown = when (tab) {
+        0 -> protectedApps
+        1 -> userApps
+        else -> systemApps
+    }
+
     val focusActive = (s?.focusUntil ?: 0L) > System.currentTimeMillis()
     val scroll = TopAppBarDefaults.exitUntilCollapsedScrollBehavior()
 
@@ -262,48 +312,99 @@ private fun HomeScreen(refresh: Int) {
                 ) { Text("Manage many apps at once") }
             }
 
-            item {
-                OutlinedTextField(
-                    value = query,
-                    onValueChange = { query = it },
-                    modifier = Modifier.fillMaxWidth(),
-                    singleLine = true,
-                    placeholder = { Text("Search apps") },
-                    leadingIcon = { Icon(Icons.Default.Search, null) },
-                    shape = RoundedCornerShape(28.dp)
-                )
+            // Tabs + search stay pinned while the list scrolls.
+            stickyHeader {
+                Column(Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.background)) {
+                    TabRow(
+                        selectedTabIndex = tab,
+                        containerColor = MaterialTheme.colorScheme.background
+                    ) {
+                        Tab(selected = tab == 0, onClick = { tab = 0 }, text = { Text("Protected ${rules.size}") })
+                        Tab(selected = tab == 1, onClick = { tab = 1 }, text = { Text("Apps $userCount") })
+                        Tab(selected = tab == 2, onClick = { tab = 2 }, text = { Text("System $systemCount") })
+                    }
+                    Spacer(Modifier.height(8.dp))
+                    OutlinedTextField(
+                        value = query,
+                        onValueChange = { query = it },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true,
+                        placeholder = {
+                            Text(
+                                when (tab) {
+                                    0 -> "Search protected apps"
+                                    1 -> "Search apps"
+                                    else -> "Search system packages"
+                                }
+                            )
+                        },
+                        leadingIcon = { Icon(Icons.Default.Search, null) },
+                        shape = RoundedCornerShape(28.dp)
+                    )
+                    Spacer(Modifier.height(8.dp))
+                }
             }
 
-            items(filtered, key = { it.pkg }) { e -> AppRow(e, s) }
+            if (shown.isEmpty()) {
+                item {
+                    Text(
+                        when {
+                            q.isNotEmpty() -> "No matches."
+                            tab == 0 -> "Nothing protected yet. Open the Apps tab and tap an app to set limits."
+                            else -> "Nothing here."
+                        },
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(vertical = 24.dp)
+                    )
+                }
+            }
+
+            items(shown, key = { it.pkg }) { e -> AppRow(e, s) }
         }
     }
 
     if (showLock) {
-        val labels = buildList {
-            addAll(listOf("15 minutes", "30 minutes", "1 hour", "2 hours", "4 hours", "Until midnight"))
-            if (focusActive) add("End lock now")
-        }
-        val mins = listOf(15, 30, 60, 120, 240, -1)
+        val st = remember { Store(ctx) }
+        val selfLocked = st.isSelfLocked()
+        val options = listOf(
+            "15 minutes" to 15,
+            "30 minutes" to 30,
+            "1 hour" to 60,
+            "2 hours" to 120,
+            "4 hours" to 240,
+            "Until midnight" to -1
+        )
         AlertDialog(
             onDismissRequest = { showLock = false },
             title = { Text("Lock all managed apps") },
             text = {
                 Column {
-                    labels.forEachIndexed { i, l ->
+                    options.forEach { (label, mins) ->
                         TextButton(
                             modifier = Modifier.fillMaxWidth(),
                             onClick = {
                                 showLock = false
-                                val st = Store(ctx)
-                                if (i >= mins.size) st.setFocusUntil(0L)
-                                else st.setFocusUntil(
-                                    if (mins[i] < 0) Clock.nextMidnight()
-                                    else System.currentTimeMillis() + mins[i] * 60_000L
+                                st.setFocusUntil(
+                                    if (mins < 0) Clock.nextMidnight()
+                                    else System.currentTimeMillis() + mins * 60_000L
                                 )
                                 enforce()
                             }
-                        ) { Text(l, Modifier.fillMaxWidth()) }
+                        ) { Text(label, Modifier.fillMaxWidth()) }
                     }
+                    TextButton(
+                        modifier = Modifier.fillMaxWidth(),
+                        onClick = {
+                            showLock = false
+                            if (selfLocked) {
+                                ctx.toast("Locked until ${Clock.formatDate(st.selfLockUntil())}")
+                            } else {
+                                st.setFocusUntil(0L)
+                                enforce()
+                            }
+                        }
+                    ) { Text("Unlock all", Modifier.fillMaxWidth()) }
                 }
             },
             confirmButton = {},
@@ -329,6 +430,14 @@ private fun StatusCard(s: Snap, ctx: Context) {
                 Icon(if (healthy) Icons.Default.CheckCircle else Icons.Default.Warning, null)
                 Spacer(Modifier.width(10.dp))
                 Text(if (healthy) "Protected" else "Needs attention", style = MaterialTheme.typography.titleLarge)
+            }
+
+            if (Store(ctx).isSelfLocked()) {
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    "Settings locked until " + Clock.formatDate(Store(ctx).selfLockUntil()),
+                    style = MaterialTheme.typography.bodyMedium
+                )
             }
 
             if (healthy) {

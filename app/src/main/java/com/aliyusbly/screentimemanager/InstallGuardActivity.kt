@@ -62,8 +62,13 @@ private fun GuardScreen(onBack: () -> Unit) {
     }
 
     val on = remember(rev) { InstallGuard.enabled(store) }
+    val selfLocked = remember(rev) { store.isSelfLocked() }
     val pending = remember(rev) { store.pending().toList().sorted() }
     val trusted = remember(rev) { store.allowed().size }
+
+    fun showSelfLocked() {
+        ctx.toast("Locked until ${Clock.formatDate(store.selfLockUntil())}")
+    }
 
     fun runAsync(block: () -> Unit) {
         scope.launch {
@@ -88,6 +93,16 @@ private fun GuardScreen(onBack: () -> Unit) {
         Column(
             Modifier.padding(pad).verticalScroll(rememberScrollState()).padding(horizontal = 16.dp).padding(bottom = 32.dp)
         ) {
+            if (selfLocked) {
+                StmCard {
+                    Text(
+                        "Self-lock active until ${Clock.formatDate(store.selfLockUntil())}. New apps cannot be approved or added to the trusted list while locked.",
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                }
+                Spacer(Modifier.height(12.dp))
+            }
+
             Text(
                 "Updates to apps you already have always go through.",
                 style = MaterialTheme.typography.bodyMedium,
@@ -99,13 +114,18 @@ private fun GuardScreen(onBack: () -> Unit) {
                 ToggleRow(
                     "Block new installs",
                     "Everything installed on this phone right now is trusted and keeps updating. " +
-                        "Anything new is hidden until you approve it here.",
+                            "Anything new is hidden until you approve it here.",
                     on
                 ) { enable ->
                     if (!DeviceControl.isOwner(ctx)) {
                         ctx.toast("Device owner is required")
+                    } else if (!enable && selfLocked) {
+                        showSelfLocked()
                     } else {
-                        runAsync { if (enable) InstallGuard.enable(ctx) else InstallGuard.disable(ctx) }
+                        runAsync {
+                            if (enable) InstallGuard.enable(ctx)
+                            else InstallGuard.disable(ctx)
+                        }
                     }
                 }
                 Text("$trusted apps trusted", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -123,8 +143,23 @@ private fun GuardScreen(onBack: () -> Unit) {
             }
             pending.forEach { pkg ->
                 PendingCard(
-                    pkg,
-                    onAllow = { runAsync { InstallGuard.approve(ctx, pkg) } },
+                    pkg = pkg,
+                    allowEnabled = !selfLocked,
+                    onAllow = {
+                        if (selfLocked) {
+                            showSelfLocked()
+                        } else {
+                            scope.launch {
+                                val ok = withContext(Dispatchers.IO) {
+                                    val allowed = InstallGuard.approve(ctx, pkg)
+                                    if (allowed) Enforcer.run(ctx.applicationContext)
+                                    allowed
+                                }
+                                if (!ok) showSelfLocked()
+                                rev++
+                            }
+                        }
+                    },
                     onRemove = {
                         scope.launch {
                             val ok = withContext(Dispatchers.IO) { InstallGuard.remove(ctx, pkg) }
@@ -144,16 +179,30 @@ private fun GuardScreen(onBack: () -> Unit) {
                         style = MaterialTheme.typography.bodyMedium
                     )
                     Spacer(Modifier.height(10.dp))
-                    FilledTonalButton(onClick = {
-                        runAsync { InstallGuard.trustCurrent(ctx) }
-                        ctx.toast("Done")
-                    }) { Text("Trust all apps installed now") }
+                    FilledTonalButton(
+                        enabled = !selfLocked,
+                        onClick = {
+                            if (selfLocked) {
+                                showSelfLocked()
+                            } else {
+                                scope.launch {
+                                    val ok = withContext(Dispatchers.IO) {
+                                        val trustedOk = InstallGuard.trustCurrent(ctx)
+                                        if (trustedOk) Enforcer.run(ctx.applicationContext)
+                                        trustedOk
+                                    }
+                                    if (ok) ctx.toast("Done") else showSelfLocked()
+                                    rev++
+                                }
+                            }
+                        }
+                    ) { Text("Trust all apps installed now") }
                 }
             }
 
             Text(
                 "Tip: in Play Store → Settings → Network preferences → Auto-update apps, " +
-                    "choose “Over any network” so your bank app keeps itself current.",
+                        "choose “Over any network” so your bank app keeps itself current.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(start = 4.dp, top = 20.dp)
@@ -163,7 +212,12 @@ private fun GuardScreen(onBack: () -> Unit) {
 }
 
 @Composable
-private fun PendingCard(pkg: String, onAllow: () -> Unit, onRemove: () -> Unit) {
+private fun PendingCard(
+    pkg: String,
+    allowEnabled: Boolean,
+    onAllow: () -> Unit,
+    onRemove: () -> Unit
+) {
     val ctx = LocalContext.current
     val (name, icon) = remember(pkg) { InstallGuard.describe(ctx, pkg) }
     StmCard {
@@ -177,7 +231,7 @@ private fun PendingCard(pkg: String, onAllow: () -> Unit, onRemove: () -> Unit) 
         }
         Spacer(Modifier.height(12.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Button(onClick = onAllow, modifier = Modifier.weight(1f)) { Text("Allow") }
+            Button(enabled = allowEnabled, onClick = onAllow, modifier = Modifier.weight(1f)) { Text("Allow") }
             FilledTonalButton(onClick = onRemove, modifier = Modifier.weight(1f)) {
                 Text("Remove", color = MaterialTheme.colorScheme.error)
             }

@@ -158,7 +158,13 @@ private fun BatchScreen(onBack: () -> Unit) {
     }
 
     fun applyRule(changeLimit: Boolean, daily: Int, lock: Int) {
-        val list = selected.map { pkg ->
+        // While self-locked only apps that aren't managed yet can be added.
+        val targets = if (store.isSelfLocked()) selected.filter { it !in rules } else selected.toList()
+        if (targets.isEmpty()) {
+            ctx.toast("Locked until ${Clock.formatDate(store.selfLockUntil())}")
+            return
+        }
+        val list = targets.map { pkg ->
             val old = rules[pkg]
             val base = old ?: AppRule(pkg, dailyLimitMin = 0)
             base.copy(

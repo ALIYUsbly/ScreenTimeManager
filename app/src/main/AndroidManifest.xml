@@ -81,18 +81,14 @@
             android:theme="@style/Theme.ScreenTimeManager"
             android:configChanges="orientation|screenSize|keyboardHidden" />
         <activity
-            android:name=".InstallGuardActivity"
-            android:exported="false"
-            android:theme="@style/Theme.ScreenTimeManager"
-            android:configChanges="orientation|screenSize|keyboardHidden"
-            android:windowSoftInputMode="adjustResize" />
-        <activity
             android:name=".BatchActivity"
             android:exported="false"
-            android:theme="@style/Theme.ScreenTimeManager"
-            android:configChanges="orientation|screenSize|keyboardHidden"
-            android:windowSoftInputMode="adjustResize" />
+            android:theme="@style/Theme.ScreenTimeManager" />
 
+        <activity
+            android:name=".InstallGuardActivity"
+            android:exported="false"
+            android:theme="@style/Theme.ScreenTimeManager" />
     </application>
 
 </manifest>

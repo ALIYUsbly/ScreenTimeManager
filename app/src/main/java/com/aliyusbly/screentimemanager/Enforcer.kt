@@ -33,6 +33,7 @@ object Enforcer {
         val store = Store(ctx)
         val now = System.currentTimeMillis()
         store.setLastTick(now)
+        Commitment.tick(ctx)   // trusted clock, re-assert protections, expire the lock
 
         val rules = store.rules()
         // Never allow locking/hiding our own app; allow Settings if a rule exists or useHide is true
@@ -50,7 +51,7 @@ object Enforcer {
         val dow0 = cal.get(Calendar.DAY_OF_WEEK) - 1
         val focus = store.focusUntil() > now
         val globalWindows = store.globalWindows()
-        val failClosed = store.failClosed()
+        val failClosed = store.failClosed() || store.isSelfLocked()
 
         val verdicts = LinkedHashMap<String, String>()
         val hideKind = HashSet<String>()
@@ -138,6 +139,9 @@ object Enforcer {
             reasons[pkg] = problems[pkg]?.let { "$why (not applied:$it)" } ?: why
         }
         store.setReasons(reasons)
+
+        // Hide any NEW app that appeared (Install Guard). It was written but never called before.
+        InstallGuard.reconcile(ctx, dpm, admin, store, hardProtected)
     }
 
     /** Returns the reason an app must be blocked right now, or null if it may run. */

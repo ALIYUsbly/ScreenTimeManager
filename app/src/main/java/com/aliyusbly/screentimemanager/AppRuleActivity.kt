@@ -83,9 +83,14 @@ private fun RuleScreen(pkg: String, name: String, existing: AppRule?, onBack: ()
         mutableStateOf(rule.launchLimit > 0 || rule.sessionLimitMin > 0 || rule.windows.isNotEmpty())
     }
     val icon = remember { try { ctx.packageManager.getApplicationIcon(pkg) } catch (_: Exception) { null } }
+    val frozen = remember { existing != null && Store(ctx).isSelfLocked() }
 
     fun save() {
         val st = Store(ctx)
+        if (st.isSelfLocked() && existing != null) {
+            ctx.toast("Locked until ${Clock.formatDate(st.selfLockUntil())}")
+            return
+        }
         st.saveRule(
             AppRule(
                 pkg = pkg,
@@ -160,6 +165,15 @@ private fun RuleScreen(pkg: String, name: String, existing: AppRule?, onBack: ()
             Modifier.padding(pad).verticalScroll(rememberScrollState()).padding(horizontal = 16.dp, vertical = 8.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
+            if (frozen) {
+                StmCard {
+                    Text(
+                        "Settings are locked until ${Clock.formatDate(Store(ctx).selfLockUntil())}. Changes to this app won't be saved.",
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                }
+            }
+
             // ── daily limit ──
             StmCard {
                 Text("Daily time limit", style = MaterialTheme.typography.titleMedium)

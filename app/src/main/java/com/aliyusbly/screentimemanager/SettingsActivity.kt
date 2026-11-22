@@ -68,12 +68,14 @@ private val levelHelp = listOf(
     "Strict, plus USB debugging is disabled. You lose adb access."
 )
 
-private data class SelfLockChoice(val label: String, val months: Int)
+private data class SelfLockChoice(val label: String, val months: Int, val minutes: Int = 0)
 
 private val selfLockChoices = listOf(
+    SelfLockChoice("10 min (test)", 0, 10),
     SelfLockChoice("1 month", 1),
     SelfLockChoice("2 months", 2),
     SelfLockChoice("3 months", 3),
+    SelfLockChoice("4 months", 4),
     SelfLockChoice("1 year", 12)
 )
 
@@ -146,21 +148,15 @@ private fun SettingsScreen(onBack: () -> Unit) {
                     style = MaterialTheme.typography.bodyMedium
                 )
                 Spacer(Modifier.height(10.dp))
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    selfLockChoices.take(2).forEach { choice ->
-                        FilledTonalButton(
-                            modifier = Modifier.weight(1f),
-                            onClick = { pendingSelfLock = choice }
-                        ) { Text(choice.label) }
-                    }
-                }
-                Spacer(Modifier.height(8.dp))
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    selfLockChoices.drop(2).forEach { choice ->
-                        FilledTonalButton(
-                            modifier = Modifier.weight(1f),
-                            onClick = { pendingSelfLock = choice }
-                        ) { Text(choice.label) }
+                selfLockChoices.chunked(2).forEachIndexed { r, row ->
+                    if (r > 0) Spacer(Modifier.height(8.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        row.forEach { choice ->
+                            FilledTonalButton(
+                                modifier = Modifier.weight(1f),
+                                onClick = { pendingSelfLock = choice }
+                            ) { Text(choice.label) }
+                        }
                     }
                 }
             }
@@ -369,22 +365,24 @@ private fun SettingsScreen(onBack: () -> Unit) {
 
     pendingSelfLock?.let { choice ->
         val baseMillis = maxOf(System.currentTimeMillis(), selfLockUntil)
-        val untilMillis = Clock.addMonths(choice.months, baseMillis)
+        val untilMillis =
+            if (choice.minutes > 0) baseMillis + choice.minutes * 60_000L
+            else Clock.addMonths(choice.months, baseMillis)
         AlertDialog(
             onDismissRequest = { pendingSelfLock = null },
             title = { Text("Lock settings for ${choice.label}?") },
             text = {
                 Text(
                     "This freezes your current settings until ${Clock.formatDate(untilMillis)}. " +
-                            "You won't be able to edit these settings or release Device Owner until then."
+                            "You won't be able to edit these settings or release Device Owner until then. " +
+                            "Your protection level stays as it is; USB debugging is only blocked in Lockdown."
                 )
             },
             confirmButton = {
                 TextButton(onClick = {
                     pendingSelfLock = null
-                    store.setSelfLockUntil(untilMillis)
-                    DeviceControl.applyHardening(ctx)
-                    ctx.toast("Self-lock active until ${Clock.formatDate(untilMillis)}")
+                    val err = Commitment.start(ctx, untilMillis - baseMillis)
+                    ctx.toast(err ?: "Locked until ${Clock.formatDate(Store(ctx).selfLockUntil())}")
                     rev++
                 }) { Text("Lock") }
             },
