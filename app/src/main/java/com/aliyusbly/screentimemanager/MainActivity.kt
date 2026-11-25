@@ -4,10 +4,7 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
-import android.content.pm.ApplicationInfo
-import android.content.pm.PackageManager
 import android.graphics.drawable.Drawable
-import android.os.Build
 import android.os.Bundle
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
@@ -44,9 +41,9 @@ import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Text
 import androidx.compose.material3.Tab
 import androidx.compose.material3.TabRow
-import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
@@ -72,7 +69,9 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-
+import android.content.pm.ApplicationInfo
+import android.content.pm.PackageManager
+import android.os.Build
 data class AppEntry(val pkg: String, val label: String, val icon: Drawable, val system: Boolean = false)
 
 private data class Snap(
@@ -152,14 +151,14 @@ private fun loadApps(ctx: Context): List<AppEntry> {
         .toSet()
 
     val apps: MutableList<ApplicationInfo> = (
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                pm.getInstalledApplications(
-                    PackageManager.ApplicationInfoFlags.of(PackageManager.MATCH_ALL.toLong())
-                )
-            } else {
-                pm.getInstalledApplications(PackageManager.GET_META_DATA)
-            }
-            ).toMutableList()
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            pm.getInstalledApplications(
+                PackageManager.ApplicationInfoFlags.of(PackageManager.MATCH_ALL.toLong())
+            )
+        } else {
+            pm.getInstalledApplications(PackageManager.GET_META_DATA)
+        }
+        ).toMutableList()
 
     // Apps we hid (e.g. Settings) vanish from the system list; keep every managed app reachable.
     val have = apps.map { it.packageName }.toHashSet()
@@ -185,7 +184,7 @@ private fun loadApps(ctx: Context): List<AppEntry> {
             // "System" tab = pre-installed background packages with no launcher icon.
             // Settings, Chrome, YouTube etc. stay in the normal Apps tab.
             val preInstalled = (ai.flags and ApplicationInfo.FLAG_SYSTEM) != 0 &&
-                    (ai.flags and ApplicationInfo.FLAG_UPDATED_SYSTEM_APP) == 0
+                (ai.flags and ApplicationInfo.FLAG_UPDATED_SYSTEM_APP) == 0
             AppEntry(
                 pkg = ai.packageName,
                 label = if (launchable) label else "$label (${ai.packageName})",
@@ -246,13 +245,13 @@ private fun HomeScreen(refresh: Int) {
     val userApps = remember(apps, query, rules) {
         apps.filter {
             !it.system && it.pkg !in rules &&
-                    (q.isEmpty() || it.label.lowercase().contains(q) || it.pkg.contains(q))
+                (q.isEmpty() || it.label.lowercase().contains(q) || it.pkg.contains(q))
         }
     }
     val systemApps = remember(apps, query, rules) {
         apps.filter {
             it.system && it.pkg !in rules &&
-                    (q.isEmpty() || it.label.lowercase().contains(q) || it.pkg.contains(q))
+                (q.isEmpty() || it.label.lowercase().contains(q) || it.pkg.contains(q))
         }
     }
     val userCount = apps.count { !it.system && it.pkg !in rules }
@@ -365,46 +364,32 @@ private fun HomeScreen(refresh: Int) {
     }
 
     if (showLock) {
-        val st = remember { Store(ctx) }
-        val selfLocked = st.isSelfLocked()
-        val options = listOf(
-            "15 minutes" to 15,
-            "30 minutes" to 30,
-            "1 hour" to 60,
-            "2 hours" to 120,
-            "4 hours" to 240,
-            "Until midnight" to -1
-        )
+        val canEnd = focusActive && !Store(ctx).isSelfLocked()
+        val labels = buildList {
+            addAll(listOf("15 minutes", "30 minutes", "1 hour", "2 hours", "4 hours", "Until midnight"))
+            if (canEnd) add("End lock now")
+        }
+        val mins = listOf(15, 30, 60, 120, 240, -1)
         AlertDialog(
             onDismissRequest = { showLock = false },
             title = { Text("Lock all managed apps") },
             text = {
                 Column {
-                    options.forEach { (label, mins) ->
+                    labels.forEachIndexed { i, l ->
                         TextButton(
                             modifier = Modifier.fillMaxWidth(),
                             onClick = {
                                 showLock = false
-                                st.setFocusUntil(
-                                    if (mins < 0) Clock.nextMidnight()
-                                    else System.currentTimeMillis() + mins * 60_000L
+                                val st = Store(ctx)
+                                if (i >= mins.size) st.setFocusUntil(0L)
+                                else st.setFocusUntil(
+                                    if (mins[i] < 0) Clock.nextMidnight()
+                                    else System.currentTimeMillis() + mins[i] * 60_000L
                                 )
                                 enforce()
                             }
-                        ) { Text(label, Modifier.fillMaxWidth()) }
+                        ) { Text(l, Modifier.fillMaxWidth()) }
                     }
-                    TextButton(
-                        modifier = Modifier.fillMaxWidth(),
-                        onClick = {
-                            showLock = false
-                            if (selfLocked) {
-                                ctx.toast("Locked until ${Clock.formatDate(st.selfLockUntil())}")
-                            } else {
-                                st.setFocusUntil(0L)
-                                enforce()
-                            }
-                        }
-                    ) { Text("Unlock all", Modifier.fillMaxWidth()) }
                 }
             },
             confirmButton = {},

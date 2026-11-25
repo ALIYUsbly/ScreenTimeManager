@@ -16,7 +16,6 @@ import android.graphics.drawable.Drawable
  *  - Updates keep the same package name, so they are always allowed (Play Store auto-update keeps working).
  *  - Any NEW package that appears (Play Store, sideload, OEM store push) is hidden within ~1 s
  *    and listed in "New app installs" until you Allow or Remove it.
- *  - While a self-lock is active, new apps cannot be approved, added via trustCurrent, or released by disabling.
  */
 object InstallGuard {
 
@@ -40,10 +39,9 @@ object InstallGuard {
         s.setBool(KEY_ON, true)
     }
 
-    /** Turning the guard off releases everything that was waiting (unless self-locked). */
-    fun disable(ctx: Context): Boolean = Enforcer.exclusive {
+    /** Turning the guard off releases everything that was waiting. */
+    fun disable(ctx: Context) = Enforcer.exclusive {
         val s = Store(ctx)
-        if (s.isSelfLocked()) return@exclusive false
         val d = DeviceControl.dpm(ctx)
         val a = DeviceControl.admin(ctx)
         val allowed = s.allowed().toMutableSet()
@@ -54,25 +52,20 @@ object InstallGuard {
         s.setAllowed(allowed)
         s.setPending(emptySet())
         s.setBool(KEY_ON, false)
-        true
     }
 
-    fun trustCurrent(ctx: Context): Boolean = Enforcer.exclusive {
+    fun trustCurrent(ctx: Context) = Enforcer.exclusive {
         val s = Store(ctx)
-        if (s.isSelfLocked()) return@exclusive false
         s.setAllowed(s.allowed() + installedUserApps(ctx))
-        true
     }
 
-    fun approve(ctx: Context, pkg: String): Boolean = Enforcer.exclusive {
+    fun approve(ctx: Context, pkg: String) = Enforcer.exclusive {
         val s = Store(ctx)
-        if (s.isSelfLocked()) return@exclusive false
         s.setAllowed(s.allowed() + pkg)
         s.setPending(s.pending() - pkg)
         try {
             DeviceControl.dpm(ctx).setApplicationHidden(DeviceControl.admin(ctx), pkg, false)
         } catch (_: Exception) {}
-        true
     }
 
     /** Un-hides and silently uninstalls (device owner needs no confirmation). */

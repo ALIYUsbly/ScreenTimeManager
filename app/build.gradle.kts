@@ -21,9 +21,9 @@ android {
 
     buildTypes {
         release {
+            // R8 shrinking broke androidx.startup at launch; keep it off for this personal app.
             optimization {
-                enable = true
-                packageScope = setOf("androidx.**", "kotlin.**", "kotlinx.**")
+                enable = false
             }
         }
     }
